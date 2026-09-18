@@ -70,21 +70,26 @@ namespace Certify.Domain
 
             try
             {
-                var interface_flags = GetInterfaceFlags();
-
-                RpcRequestEncryption = GetFlagState(interface_flags, InterfaceFlags.ENFORCE_ENCRYPT_ICERTREQUEST);
-
-                var request_restrictions = new List<Tuple<InterfaceFlags, string>>()
+                if (TryGetInterfaceFlags(out InterfaceFlags interface_flags))
                 {
-                    new Tuple<InterfaceFlags, string>(InterfaceFlags.NO_REMOTE_ICERTREQUEST, "No Remote"),
-                    new Tuple<InterfaceFlags, string>(InterfaceFlags.NO_LOCAL_ICERTREQUEST, "No Local"),
-                    new Tuple<InterfaceFlags, string>(InterfaceFlags.NO_RPC_ICERTREQUEST, "No Access"),
-                };
+                    RpcRequestEncryption = GetFlagState(interface_flags, InterfaceFlags.ENFORCE_ENCRYPT_ICERTREQUEST);
 
-                foreach (var r in request_restrictions)
+                    var request_restrictions = new List<Tuple<InterfaceFlags, string>>()
+                    {
+                        new Tuple<InterfaceFlags, string>(InterfaceFlags.NO_REMOTE_ICERTREQUEST, "No Remote"),
+                        new Tuple<InterfaceFlags, string>(InterfaceFlags.NO_LOCAL_ICERTREQUEST, "No Local"),
+                        new Tuple<InterfaceFlags, string>(InterfaceFlags.NO_RPC_ICERTREQUEST, "No Access"),
+                    };
+
+                    foreach (var r in request_restrictions)
+                    {
+                        if (TestFlagState(interface_flags, r.Item1))
+                            RpcRequestRestrictions.Add(r.Item2);
+                    }
+                }
+                else
                 {
-                    if (TestFlagState(interface_flags, r.Item1))
-                        RpcRequestRestrictions.Add(r.Item2);
+                    RpcRequestEncryption = "Unknown";
                 }
             }
             catch (Exception e)
@@ -175,7 +180,11 @@ namespace Certify.Domain
 
         private void CheckVulnerableEsc11()
         {
-            if (RpcRequestEncryption == "Disabled")
+            // MS-ICPR ignores IF_NOREMOTEICERTREQUEST, so only IF_NORPCICERTREQUEST
+            // prevents requests through the ICertPassage interface used by ESC11.
+            var rpc_requests_allowed = !RpcRequestRestrictions.Contains("No Access");
+
+            if (RpcRequestEncryption == "Disabled" && rpc_requests_allowed)
                 Vulnerabilities.Add(11, "The CA does not enforce encryption on the ICertPassage RPC interface.");
         }
 
@@ -210,9 +219,15 @@ namespace Certify.Domain
             return (EditFlags)GetRemoteRegistryKey<int>($"SYSTEM\\CurrentControlSet\\Services\\CertSvc\\Configuration\\{Name}\\PolicyModules\\CertificateAuthority_MicrosoftDefault.Policy", "EditFlags");
         }
 
-        private InterfaceFlags GetInterfaceFlags()
+        private bool TryGetInterfaceFlags(out InterfaceFlags interface_flags)
         {
-            return (InterfaceFlags)GetRemoteRegistryKey<int>($"SYSTEM\\CurrentControlSet\\Services\\CertSvc\\Configuration\\{Name}", "InterfaceFlags");
+            interface_flags = default;
+
+            if (!TryGetRemoteRegistryKey($"SYSTEM\\CurrentControlSet\\Services\\CertSvc\\Configuration\\{Name}", "InterfaceFlags", out int value))
+                return false;
+
+            interface_flags = (InterfaceFlags)value;
+            return true;
         }
 
         private string[] GetDisableExtensionList()
@@ -222,6 +237,14 @@ namespace Certify.Domain
 
         private T GetRemoteRegistryKey<T>(string key_name, string value_name)
         {
+            TryGetRemoteRegistryKey(key_name, value_name, out T value);
+            return value;
+        }
+
+        private bool TryGetRemoteRegistryKey<T>(string key_name, string value_name, out T value)
+        {
+            value = default;
+
             if (this.DnsHostname == null)
                 throw new NullReferenceException("DnsHostname is null");
 
@@ -237,7 +260,8 @@ namespace Certify.Domain
                     {
                         using (var sub_key = base_key.OpenSubKey(key_name))
                         {
-                            return (T)sub_key.GetValue(value_name);
+                            value = (T)sub_key.GetValue(value_name);
+                            return true;
                         }
                     }
                     catch (SecurityException e)
@@ -249,7 +273,7 @@ namespace Certify.Domain
             catch (Exception e)
             {
                 Console.WriteLine($"[X] Could not connect to the HKLM hive - {e.Message}");
-                return default;
+                return false;
             }
         }
 
